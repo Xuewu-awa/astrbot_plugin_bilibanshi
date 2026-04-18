@@ -20,8 +20,8 @@
 
 ### 关键词管理
 
-/bilibanshi c <关键词> 添加搜索关键词
-/bilibanshi del <关键词> 删除搜索关键词
+/bilibanshi keyword add <关键词>
+/bilibanshi keyword remove <关键词>
 
 ### 黑名单管理
 
