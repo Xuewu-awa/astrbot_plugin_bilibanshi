@@ -41,6 +41,20 @@ class BilibiliPolluterPlugin(Star):
         # 已绑定的群（运行时数据，单独存储在数据目录）
         self.bound_groups_path = self.data_dir / "bound_groups.json"
         self.bound_groups = self._load_bound_groups()
+
+        # 群权限控制状态（白名单/黑名单模式及名单）
+        self.access_control_state_path = self.data_dir / "access_control_state.json"
+        self._restore_access_control_state()
+
+        # 运行状态（已发送标题、手动触发冷却）
+        self.runtime_state_path = self.data_dir / "runtime_state.json"
+        runtime_state = self._load_runtime_state()
+        self.sent_titles: Dict[str, Dict[str, str]] = runtime_state['sent_titles']
+        self.last_manual_trigger_ts = runtime_state['last_manual_trigger_ts']
+        self.manual_cooldown_until_ts = runtime_state['manual_cooldown_until_ts']
+        self.manual_now_window_seconds = 60
+        self.manual_now_cooldown_seconds = 60
+        self.manual_trigger_lock = asyncio.Lock()
         
         # 运行状态
         self.running = False
@@ -150,6 +164,129 @@ class BilibiliPolluterPlugin(Star):
         except Exception as e:
             logger.error(f"保存绑定群数据失败: {e}")
 
+    def _load_access_control_state(self) -> Dict[str, Any]:
+        """加载白名单/黑名单控制状态"""
+        default_state = {
+            'use_whitelist_mode': False,
+            'whitelist_groups': [],
+            'blacklist_groups': [],
+        }
+
+        if not self.access_control_state_path.exists():
+            return default_state
+
+        try:
+            with open(self.access_control_state_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                return default_state
+
+            return {
+                'use_whitelist_mode': bool(data.get('use_whitelist_mode', False)),
+                'whitelist_groups': self._normalize_group_list(data.get('whitelist_groups', [])),
+                'blacklist_groups': self._normalize_group_list(data.get('blacklist_groups', [])),
+            }
+        except Exception as e:
+            logger.error(f"读取群权限控制状态失败: {e}")
+            return default_state
+
+    def _save_access_control_state(self):
+        """保存白名单/黑名单控制状态到插件本地"""
+        state = {
+            'use_whitelist_mode': self._is_whitelist_mode(),
+            'whitelist_groups': sorted(self._get_group_list('whitelist_groups')),
+            'blacklist_groups': sorted(self._get_group_list('blacklist_groups')),
+        }
+
+        try:
+            with open(self.access_control_state_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存群权限控制状态失败: {e}")
+
+    def _restore_access_control_state(self):
+        """恢复白名单/黑名单控制状态，优先采用较新的状态文件"""
+        config_path = getattr(self.config, 'config_path', '')
+        config_mtime = os.path.getmtime(config_path) if config_path and os.path.exists(config_path) else 0
+        local_mtime = (
+            os.path.getmtime(self.access_control_state_path)
+            if self.access_control_state_path.exists()
+            else 0
+        )
+
+        if local_mtime > config_mtime:
+            state = self._load_access_control_state()
+            self.config['use_whitelist_mode'] = bool(state.get('use_whitelist_mode', False))
+            self.config['whitelist_groups'] = state.get('whitelist_groups', [])
+            self.config['blacklist_groups'] = state.get('blacklist_groups', [])
+            try:
+                self.config.save_config()
+                logger.info("已从插件本地状态恢复白名单/黑名单配置")
+            except Exception as e:
+                logger.error(f"恢复白名单/黑名单配置到 AstrBot 失败: {e}")
+            return
+
+        self._save_access_control_state()
+
+    def _load_runtime_state(self) -> Dict[str, Any]:
+        """加载运行状态"""
+        default_state = {
+            'sent_titles': {},
+            'last_manual_trigger_ts': 0.0,
+            'manual_cooldown_until_ts': 0.0,
+        }
+
+        if not self.runtime_state_path.exists():
+            return default_state
+
+        try:
+            with open(self.runtime_state_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if not isinstance(data, dict):
+                return default_state
+
+            sent_titles = {}
+            raw_sent_titles = data.get('sent_titles', {})
+            if isinstance(raw_sent_titles, dict):
+                for _, item in raw_sent_titles.items():
+                    if not isinstance(item, dict):
+                        continue
+
+                    title = str(item.get('title', '')).strip()
+                    normalized_title = self._normalize_title(title)
+                    if not normalized_title:
+                        continue
+
+                    sent_titles[normalized_title] = {
+                        'title': title,
+                        'sent_at': str(item.get('sent_at', '')).strip(),
+                    }
+
+            return {
+                'sent_titles': sent_titles,
+                'last_manual_trigger_ts': float(data.get('last_manual_trigger_ts', 0) or 0),
+                'manual_cooldown_until_ts': float(data.get('manual_cooldown_until_ts', 0) or 0),
+            }
+        except Exception as e:
+            logger.error(f"读取运行状态失败: {e}")
+            return default_state
+
+    def _save_runtime_state(self):
+        """保存运行状态"""
+        state = {
+            'sent_titles': self.sent_titles,
+            'last_manual_trigger_ts': self.last_manual_trigger_ts,
+            'manual_cooldown_until_ts': self.manual_cooldown_until_ts,
+        }
+
+        try:
+            with open(self.runtime_state_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存运行状态失败: {e}")
+
     async def _cleanup_temp_files(self):
         """清理临时文件"""
         files_to_remove = list(self.temp_files)
@@ -191,6 +328,174 @@ class BilibiliPolluterPlugin(Star):
         
         return cleaned.strip()
 
+    def _normalize_title(self, title: str) -> str:
+        """规范化标题，用于去重判断"""
+        if not title:
+            return ""
+
+        normalized = re.sub(r'\s+', ' ', str(title)).strip().lower()
+        return normalized
+
+    def _normalize_group_list(self, group_list: Any) -> List[str]:
+        """规范化群号列表"""
+        if not isinstance(group_list, list):
+            return []
+
+        normalized_groups = []
+        for group_id in group_list:
+            normalized_group_id = self._normalize_group_id(group_id)
+            if normalized_group_id and normalized_group_id not in normalized_groups:
+                normalized_groups.append(normalized_group_id)
+
+        return normalized_groups
+
+    def _has_sent_title(self, title: str) -> bool:
+        """判断标题是否已发送过"""
+        normalized_title = self._normalize_title(title)
+        if not normalized_title:
+            return False
+
+        return normalized_title in self.sent_titles
+
+    def _record_sent_title(self, title: str):
+        """记录已发送标题"""
+        normalized_title = self._normalize_title(title)
+        if not normalized_title:
+            return
+
+        self.sent_titles[normalized_title] = {
+            'title': str(title).strip(),
+            'sent_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
+        self._save_runtime_state()
+        logger.info(f"已记录发送标题: {title}")
+
+    def _get_manual_block_message(self, event: AstrMessageEvent) -> Optional[str]:
+        """检查手动触发所在群是否允许发送"""
+        group_id = getattr(event.message_obj, 'group_id', None)
+        if group_id is None:
+            return None
+
+        group_id = str(group_id)
+        if self._should_send_to_group(group_id):
+            return None
+
+        return f"❌ {self._get_group_block_reason(group_id)}，已取消发送"
+
+    async def _check_manual_now_cooldown(self) -> Optional[str]:
+        """检查 /bilibanshi now 的冷却状态"""
+        async with self.manual_trigger_lock:
+            now_ts = datetime.now().timestamp()
+
+            if self.manual_cooldown_until_ts > now_ts:
+                remaining_seconds = max(1, int(self.manual_cooldown_until_ts - now_ts + 0.999))
+                return f"⏳ /bilibanshi now 冷却中，请 {remaining_seconds} 秒后再试"
+
+            if self.last_manual_trigger_ts and now_ts - self.last_manual_trigger_ts < self.manual_now_window_seconds:
+                self.manual_cooldown_until_ts = now_ts + self.manual_now_cooldown_seconds
+                self._save_runtime_state()
+                logger.info("检测到 /bilibanshi now 1分钟内重复触发，已进入冷却")
+                return "⏳ 检测到 1 分钟内重复触发，已进入 60 秒冷却，请稍后再试"
+
+            self.last_manual_trigger_ts = now_ts
+            self.manual_cooldown_until_ts = 0.0
+            self._save_runtime_state()
+            return None
+
+    def _get_manual_now_cooldown_remaining(self) -> int:
+        """获取 /bilibanshi now 剩余冷却秒数"""
+        now_ts = datetime.now().timestamp()
+        if self.manual_cooldown_until_ts <= now_ts:
+            return 0
+
+        return max(1, int(self.manual_cooldown_until_ts - now_ts + 0.999))
+
+    def _is_whitelist_mode(self) -> bool:
+        """当前是否启用白名单模式"""
+        return bool(self.config.get('use_whitelist_mode', False))
+
+    def _get_group_mode_name(self) -> str:
+        """获取当前群推送模式名称"""
+        return "白名单模式" if self._is_whitelist_mode() else "黑名单模式"
+
+    def _get_group_list(self, config_key: str) -> Set[str]:
+        """获取并规范化群号列表"""
+        groups = self.config.get(config_key, [])
+        if not isinstance(groups, list):
+            return set()
+
+        return {
+            self._normalize_group_id(group_id)
+            for group_id in groups
+            if self._normalize_group_id(group_id)
+        }
+
+    def _normalize_group_id(self, group_id: Any) -> str:
+        """规范化群号，兼容不同来源的格式"""
+        if group_id is None:
+            return ""
+
+        normalized = str(group_id).strip()
+        if not normalized:
+            return ""
+
+        digits = re.findall(r'\d+', normalized)
+        if len(digits) == 1:
+            return digits[0]
+
+        return normalized
+
+    def _should_send_to_group(self, group_id: str) -> bool:
+        """判断当前群在现有模式下是否允许推送"""
+        normalized_group_id = self._normalize_group_id(group_id)
+        if not normalized_group_id:
+            return False
+
+        if self._is_whitelist_mode():
+            return normalized_group_id in self._get_group_list('whitelist_groups')
+
+        return normalized_group_id not in self._get_group_list('blacklist_groups')
+
+    def _get_allowed_bound_groups(self) -> Dict[str, str]:
+        """获取当前模式下允许推送的已绑定群"""
+        return {
+            self._normalize_group_id(group_id): umo
+            for group_id, umo in self.bound_groups.items()
+            if self._should_send_to_group(group_id)
+        }
+
+    def _get_group_block_reason(self, group_id: str) -> str:
+        """获取群被拦截的原因"""
+        if self._is_whitelist_mode():
+            return f"当前为白名单模式，群 {group_id} 不在白名单中"
+
+        return f"当前为黑名单模式，群 {group_id} 在黑名单中"
+
+    def _update_group_access_list(self, config_key: str, action: str, group_id: str, list_name: str) -> str:
+        """更新白名单/黑名单配置"""
+        normalized_group_id = self._normalize_group_id(group_id)
+        group_list = self._normalize_group_list(self.config.get(config_key, []))
+
+        if action == "add":
+            if normalized_group_id not in group_list:
+                group_list.append(normalized_group_id)
+                self.config[config_key] = group_list
+                self.config.save_config()
+                self._save_access_control_state()
+                return f"✅ 已添加{list_name}群: {normalized_group_id}"
+            return f"该群已在{list_name}中"
+
+        if action == "remove":
+            if normalized_group_id in group_list:
+                group_list.remove(normalized_group_id)
+                self.config[config_key] = group_list
+                self.config.save_config()
+                self._save_access_control_state()
+                return f"✅ 已移除{list_name}群: {normalized_group_id}"
+            return f"该群不在{list_name}中"
+
+        return "未知操作，请使用 add 或 remove"
+
     # ==================== 自动记录群 ====================
     
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -198,7 +503,7 @@ class BilibiliPolluterPlugin(Star):
         """自动记录群 unified_msg_origin（懒人模式）"""
         try:
             umo = event.unified_msg_origin
-            group_id = str(event.message_obj.group_id)
+            group_id = self._normalize_group_id(getattr(event.message_obj, 'group_id', None))
             
             if not group_id or not umo:
                 return
@@ -322,6 +627,10 @@ class BilibiliPolluterPlugin(Star):
                         # 检查标题是否包含关键词
                         if not self._should_include_video(title):
                             continue
+
+                        if self._has_sent_title(title):
+                            logger.debug(f"视频标题已发送过，跳过: {title}")
+                            continue
                         
                         bvid = video.get('bvid', '')
                         if not bvid:
@@ -392,8 +701,9 @@ class BilibiliPolluterPlugin(Star):
             keyword = random.choice(keywords)
             logger.info(f"第{attempt+1}次尝试，选中关键词: {keyword}")
             
-            # 随机选页数（1-3页）
-            pages = random.randint(1, 3)
+            # 随机选页数（从配置读取最大页数，最小1页）
+            max_pages_config = self.config.get('max_pages', 3)
+            pages = random.randint(1, max(1, max_pages_config))
             
             # 搜索该关键词
             videos = await self._search_videos_by_keyword(keyword, pages)
@@ -401,9 +711,14 @@ class BilibiliPolluterPlugin(Star):
             if not videos:
                 logger.info(f"关键词 '{keyword}' 没有找到符合时长的视频")
                 continue
+
+            unsent_videos = [video for video in videos if not self._has_sent_title(video.get('title', ''))]
+            if not unsent_videos:
+                logger.info(f"关键词 '{keyword}' 搜索结果均为已发送标题，重新选择")
+                continue
             
             # 随机选一个视频
-            selected = random.choice(videos)
+            selected = random.choice(unsent_videos)
             duration = selected.get('duration_seconds', 0)
             
             logger.info(f"随机选中视频: {selected['title']} (时长: {selected['duration']}, {duration}秒)")
@@ -680,28 +995,39 @@ class BilibiliPolluterPlugin(Star):
         yield event.chain_result(chain)
         logger.info("已发送到当前聊天")
 
-    async def _send_to_all_groups(self, file_path: str, video_info: Dict[str, Any]):
+    async def _send_to_all_groups(self, file_path: str, video_info: Dict[str, Any]) -> int:
         """发送到所有已绑定的群（带并发控制和错误处理）"""
-        blacklist = set(str(b) for b in self.config.get('blacklist_groups', []))
-        
         if not self.bound_groups:
             logger.warning("没有已绑定的群，等待自动记录...")
-            return
+            return 0
+
+        target_groups = self._get_allowed_bound_groups()
+        if not target_groups:
+            logger.warning(f"当前为{self._get_group_mode_name()}，没有可发送的群，跳过本次推送")
+            return 0
+
+        skipped_count = len(self.bound_groups) - len(target_groups)
+        if skipped_count > 0:
+            logger.info(
+                f"群推送过滤完成: 已绑定 {len(self.bound_groups)} 个群，可发送 {len(target_groups)} 个，跳过 {skipped_count} 个"
+            )
         
         chain = self._create_video_message(video_info, file_path)
         message_chain = MessageChain(chain)
         
         # 使用信号量控制并发发送（最多同时发3个群）
         send_semaphore = Semaphore(3)
+        send_success_count = 0
         
         async def send_to_group(group_id: str, umo: str):
-            if group_id in blacklist:
-                logger.debug(f"群 {group_id} 在黑名单中，跳过")
-                return
-            
+            nonlocal send_success_count
             async with send_semaphore:
+                if not self._should_send_to_group(group_id):
+                    logger.info(f"发送前最终校验拦截群 {group_id}：{self._get_group_block_reason(group_id)}")
+                    return
                 try:
                     await self.context.send_message(umo, message_chain)
+                    send_success_count += 1
                     logger.info(f"已发送到群 {group_id}")
                 except Exception as e:
                     logger.error(f"发送到群 {group_id} 失败: {e}")
@@ -709,8 +1035,10 @@ class BilibiliPolluterPlugin(Star):
                 await asyncio.sleep(1)
         
         # 并发发送
-        tasks = [send_to_group(gid, umo) for gid, umo in self.bound_groups.items()]
+        tasks = [send_to_group(gid, umo) for gid, umo in target_groups.items()]
         await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info(f"本次群推送成功发送到 {send_success_count} 个群")
+        return send_success_count
 
     # ==================== 核心流程 ====================
 
@@ -756,6 +1084,16 @@ class BilibiliPolluterPlugin(Star):
                   如果没有 event，说明是定时任务，发送到所有已绑定的群
         """
         logger.info("开始随机搬石...")
+
+        if event:
+            block_message = self._get_manual_block_message(event)
+            if block_message:
+                yield event.plain_result(block_message)
+                return
+        else:
+            if not self._get_allowed_bound_groups():
+                logger.warning(f"当前为{self._get_group_mode_name()}，没有可发送的群，跳过本次搬石")
+                return
         
         # 执行下载
         success, file_path, video_info = await self._execute_scan_and_download(event)
@@ -770,9 +1108,14 @@ class BilibiliPolluterPlugin(Star):
             # 命令触发：发送到当前聊天
             async for result in self._send_to_current_chat(event, file_path, video_info):
                 yield result
+            self._record_sent_title(video_info.get('title', ''))
         else:
             # 定时任务：发送到所有群
-            await self._send_to_all_groups(file_path, video_info)
+            send_success_count = await self._send_to_all_groups(file_path, video_info)
+            if send_success_count > 0:
+                self._record_sent_title(video_info.get('title', ''))
+            else:
+                logger.warning(f"视频未成功发送到任何群，不记录标题: {video_info.get('title', '')}")
         
         # 清理文件
         await self._cleanup_after_send(file_path)
@@ -857,6 +1200,16 @@ class BilibiliPolluterPlugin(Star):
     @filter.command("bilibanshi now")
     async def scan_now(self, event: AstrMessageEvent):
         """立即执行一次（发送到当前聊天）"""
+        block_message = self._get_manual_block_message(event)
+        if block_message:
+            yield event.plain_result(block_message)
+            return
+
+        cooldown_message = await self._check_manual_now_cooldown()
+        if cooldown_message:
+            yield event.plain_result(cooldown_message)
+            return
+
         yield event.plain_result("开始搬石...")
         async for result in self._scan_and_download(event):
             yield result
@@ -865,24 +1218,67 @@ class BilibiliPolluterPlugin(Star):
     async def list_status(self, event: AstrMessageEvent):
         """查看当前状态"""
         max_duration = self.config.get('max_duration', 600)
+        whitelist_groups = sorted(self._get_group_list('whitelist_groups'))
+        blacklist_groups = sorted(self._get_group_list('blacklist_groups'))
+        use_whitelist_mode = self._is_whitelist_mode()
+        cooldown_remaining = self._get_manual_now_cooldown_remaining()
         
         status = [
             "=== B站搬石状态 ===",
             f"运行状态: {'✅ 运行中' if self.running else '❌ 已停止'}",
             f"扫描间隔: {self.config.get('scan_interval', 60)}秒",
             f"最大时长: {max_duration}秒 ({max_duration//60}分钟)",
+            f"已记录标题: {len(self.sent_titles)} 个",
+            f"/bilibanshi now 冷却: {'⏳ 剩余 ' + str(cooldown_remaining) + ' 秒' if cooldown_remaining > 0 else '✅ 无'}",
+            f"群推送模式: {self._get_group_mode_name()}",
             f"已绑定的群: {len(self.bound_groups)} 个",
-            f"黑名单群: {len(self.config.get('blacklist_groups', []))} 个",
+            f"白名单群: {len(whitelist_groups)} 个",
+            f"黑名单群: {len(blacklist_groups)} 个",
             f"关键词: {len(self.config.get('search_keywords', []))} 个",
             f"数据目录: {self.data_dir}",
             f"FFmpeg: {'✅ 可用' if self.ffmpeg_available else '❌ 不可用'}",
         ]
+
+        if use_whitelist_mode and not whitelist_groups:
+            status.append("提示: 当前为白名单模式，但白名单为空，不会向任何群推送")
+        else:
+            active_list_name = "白名单" if use_whitelist_mode else "黑名单"
+            active_groups = whitelist_groups if use_whitelist_mode else blacklist_groups
+            if active_groups:
+                status.append(f"当前生效的{active_list_name}: {', '.join(active_groups)}")
         
         # 显示已绑定的群号
         if self.bound_groups:
             status.append(f"群列表: {', '.join(self.bound_groups.keys())}")
         
         yield event.plain_result("\n".join(status))
+
+    @filter.command("bilibanshi mode")
+    async def set_group_mode(self, event: AstrMessageEvent):
+        """设置群推送模式: /bilibanshi mode whitelist 或 /bilibanshi mode blacklist"""
+        parts = event.message_str.strip().split()
+        if len(parts) < 3:
+            yield event.plain_result(
+                f"当前模式: {self._get_group_mode_name()}\n用法: /bilibanshi mode <whitelist|blacklist>"
+            )
+            return
+
+        mode = parts[2].lower()
+        if mode in ["whitelist", "white", "白名单"]:
+            self.config['use_whitelist_mode'] = True
+            self.config.save_config()
+            self._save_access_control_state()
+            message = "✅ 已切换到白名单模式"
+            if not self._get_group_list('whitelist_groups'):
+                message += "（当前白名单为空，不会向任何群推送）"
+            yield event.plain_result(message)
+        elif mode in ["blacklist", "black", "黑名单"]:
+            self.config['use_whitelist_mode'] = False
+            self.config.save_config()
+            self._save_access_control_state()
+            yield event.plain_result("✅ 已切换到黑名单模式")
+        else:
+            yield event.plain_result("模式只能是 whitelist 或 blacklist")
 
     @filter.command("bilibanshi blacklist")
     async def manage_blacklist(self, event: AstrMessageEvent):
@@ -898,26 +1294,27 @@ class BilibiliPolluterPlugin(Star):
         if not group_id.isdigit():
             yield event.plain_result("群号必须是数字")
             return
-        
-        blacklist = self.config.get('blacklist_groups', [])
-        
-        if action == "add":
-            if group_id not in blacklist:
-                blacklist.append(group_id)
-                self.config['blacklist_groups'] = blacklist
-                self.config.save_config()
-                yield event.plain_result(f"✅ 已添加黑名单群: {group_id}")
-            else:
-                yield event.plain_result("该群已在黑名单中")
-        elif action == "remove":
-            if group_id in self.config.get('blacklist_groups', []):
-                self.config['blacklist_groups'].remove(group_id)
-                self.config.save_config()
-                yield event.plain_result(f"✅ 已移除黑名单群: {group_id}")
-            else:
-                yield event.plain_result("该群不在黑名单中")
-        else:
-            yield event.plain_result("未知操作，请使用 add 或 remove")
+
+        message = self._update_group_access_list('blacklist_groups', action, group_id, '黑名单')
+        yield event.plain_result(message)
+
+    @filter.command("bilibanshi whitelist")
+    async def manage_whitelist(self, event: AstrMessageEvent):
+        """管理白名单: /bilibanshi whitelist add 123456 或 /bilibanshi whitelist remove 123456"""
+        parts = event.message_str.strip().split()
+        if len(parts) < 4:
+            yield event.plain_result("用法: /bilibanshi whitelist <add|remove> <群号>")
+            return
+
+        action = parts[2].lower()
+        group_id = parts[3]
+
+        if not group_id.isdigit():
+            yield event.plain_result("群号必须是数字")
+            return
+
+        message = self._update_group_access_list('whitelist_groups', action, group_id, '白名单')
+        yield event.plain_result(message)
 
     @filter.command("bilibanshi keyword")
     async def manage_keyword(self, event: AstrMessageEvent):
