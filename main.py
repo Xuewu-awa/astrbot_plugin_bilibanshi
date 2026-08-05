@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import os
 import random
 import re
@@ -28,7 +28,7 @@ except ImportError:
     from state_store import StateStore
 
 
-@register("astrbot_plugin_bilibanshi", "Xuewu", "B站搬石 - 随机搬视频到群", "1.2.0")
+@register("astrbot_plugin_bilibanshi", "Xuewu", "B站搬石 - 随机搬视频到群", "1.2.1")
 class BilibiliPolluterPlugin(Star):
     # /bilibanshi now 防刷屏参数
     MANUAL_NOW_WINDOW_SECONDS = 60
