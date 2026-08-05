@@ -16,6 +16,11 @@ try:
 except ImportError:
     aiofiles = None  # 无 aiofiles 时回退到同步写入
 
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None  # 无 aiohttp 时使用 session 默认超时
+
 logger = logging.getLogger(__name__)
 
 # 合并后是否在容器中前置 moov（利于在线播放/上传）
@@ -273,50 +278,67 @@ class Downloader:
     async def _download_file(self, bvid: str, url: str, output_path: Path) -> bool:
         """流式下载文件。DASH 流要求 Referer 精确到视频页。
 
-        超过 MAX_FILE_SIZE 的响应直接拒绝，防止磁盘耗尽。
+        - 下载超时放宽：total=None（不限制总时长），仅 sock_read=60s
+          （60 秒无数据才判超时），避免 CDN 波动时大文件下载超时
+        - 失败重试 1 次（B 站 CDN 节点抖动是常态，重试成功率很高）
+        - 超过 MAX_FILE_SIZE 的响应直接拒绝，防止磁盘耗尽
         """
-        try:
-            headers = {"Referer": f"https://www.bilibili.com/video/{bvid}"}
-            async with self.semaphore:
-                async with self.session.get(url, headers=headers) as response:
-                    if response.status != 200:
-                        logger.error(f"下载失败: HTTP {response.status}")
-                        return False
-                    content_length = response.content_length or 0
-                    if content_length > self.MAX_FILE_SIZE:
-                        logger.error(
-                            f"文件过大({content_length / 1024 / 1024:.0f}MB > "
-                            f"{self.MAX_FILE_SIZE / 1024 / 1024:.0f}MB)，拒绝下载"
-                        )
-                        return False
-                    if aiofiles is not None:
-                        async with aiofiles.open(output_path, "wb") as f:
-                            downloaded = 0
-                            async for chunk in response.content.iter_chunked(8192):
-                                downloaded += len(chunk)
-                                if downloaded > self.MAX_FILE_SIZE:
-                                    logger.error("下载超过大小上限，已中止")
-                                    return False
-                                await f.write(chunk)
-                    else:
-                        # 回退：同步写入（小 chunk，阻塞可忽略）
-                        with open(output_path, "wb") as f:
-                            downloaded = 0
-                            async for chunk in response.content.iter_chunked(8192):
-                                downloaded += len(chunk)
-                                if downloaded > self.MAX_FILE_SIZE:
-                                    logger.error("下载超过大小上限，已中止")
-                                    return False
-                                f.write(chunk)
-            return True
-        except asyncio.TimeoutError:
-            logger.error(f"下载超时: {url[:60]}")
-            return False
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"下载出错: {e}")
-            return False
+        headers = {"Referer": f"https://www.bilibili.com/video/{bvid}"}
+        # 下载超时放宽：total=None（不限制总时长），仅 sock_read=60s
+        timeout = None
+        if aiohttp is not None:
+            timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=60)
+        for attempt in (1, 2):
+            try:
+                async with self.semaphore:
+                    async with self.session.get(
+                        url, headers=headers, timeout=timeout
+                    ) as response:
+                        if response.status != 200:
+                            logger.error(f"下载失败: HTTP {response.status}")
+                            return False
+                        content_length = response.content_length or 0
+                        if content_length > self.MAX_FILE_SIZE:
+                            logger.error(
+                                f"文件过大({content_length / 1024 / 1024:.0f}MB > "
+                                f"{self.MAX_FILE_SIZE / 1024 / 1024:.0f}MB)，拒绝下载"
+                            )
+                            return False
+                        if aiofiles is not None:
+                            async with aiofiles.open(output_path, "wb") as f:
+                                downloaded = 0
+                                async for chunk in response.content.iter_chunked(8192):
+                                    downloaded += len(chunk)
+                                    if downloaded > self.MAX_FILE_SIZE:
+                                        logger.error("下载超过大小上限，已中止")
+                                        return False
+                                    await f.write(chunk)
+                        else:
+                            # 回退：同步写入（小 chunk，阻塞可忽略）
+                            with open(output_path, "wb") as f:
+                                downloaded = 0
+                                async for chunk in response.content.iter_chunked(8192):
+                                    downloaded += len(chunk)
+                                    if downloaded > self.MAX_FILE_SIZE:
+                                        logger.error("下载超过大小上限，已中止")
+                                        return False
+                                    f.write(chunk)
+                return True
+            except asyncio.TimeoutError:
+                logger.warning(f"下载超时(第{attempt}次): {url[:60]}")
+                if attempt == 1:
+                    await asyncio.sleep(2)
+                    continue
+                return False
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"下载出错(第{attempt}次): {e}")
+                if attempt == 1:
+                    await asyncio.sleep(2)
+                    continue
+                return False
+        return False
 
     async def _merge_video_audio(
         self, video_path: Path, audio_path: Path, output_path: Path, codecid, transcode: bool = False
