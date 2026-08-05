@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# 插件运行时数据
+data/
+
+# Reasonix 工作区
+.reasonix/

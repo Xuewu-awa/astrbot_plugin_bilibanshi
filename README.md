@@ -31,6 +31,8 @@
 - `scan_interval`：扫描间隔（秒）
 - `max_duration`：最大视频时长（秒）
 - `max_pages`：搜索页数
+- `video_quality`：视频画质（16/32/64/80，默认 64=720P）
+- `transcode`：强制转码为 H.264 main profile（默认关闭，兼容性最好但更耗 CPU）
 - `delete_after_send`：发送后删除本地视频
 - `search_keywords`：搜索关键词列表
 - `use_whitelist_mode`：是否启用白名单模式
@@ -57,11 +59,11 @@
 
 - 定时搬石会按照当前模式过滤群
 - `/bilibanshi now` 在群内手动触发时，也会遵守当前模式
-- 需要注意的是 有一个bug 但我不知道这个bug是怎么样出现的 我觉得可能是时间戳的问题 但实在是没时间修了 就先发出来了
-- **Bug表现如下：重启可能会导致白名单配置被清空 变成默认配置**
-- 遇到问题的话 就重新添加一下名单就行 
+- 白名单/黑名单配置以 AstrBot 配置为唯一数据源（WebUI 或命令修改均可，重启不会丢失）；从旧版本升级时，插件会自动迁移旧版 `data/access_control_state.json` 中的名单
 
 ## 指令列表
+
+> 所有指令（包括 `/bilibanshi list`）均需要**管理员权限**才能执行，防止普通群成员查看服务器信息、随意触发下载或修改配置。
 
 ### 基础控制
 
@@ -106,7 +108,7 @@
 
 - 插件每次成功发送视频后，都会记录该视频标题
 - 之后再次搜索到相同标题时会自动跳过
-- 记录数据保存在插件目录下的 `data/runtime_state.json`
+- 记录数据保存在 AstrBot 数据目录的 `data/plugin_data/astrbot_plugin_bilibanshi/runtime_state.json`（旧版插件目录下的 `data/` 会在首次启动时自动迁移）
 
 ### 防止手动刷屏
 
@@ -129,6 +131,27 @@
 2. 或发送命令：`/bilibanshi mode blacklist`
 3. 添加不接收视频的群：
    - `/bilibanshi blacklist add 123456`
+
+### 视频发送失败排查（QQ/NapCat）
+
+如果遇到 `rich media transfer failed` 错误：
+
+1. 先手动在 QQ 里发送一个 mp4 视频测试。手动也发不出 → 是 QQ/NapCat 侧问题（版本不匹配、风控、上传接口故障），与插件无关
+2. 手动能发但插件发不出 → 请更新插件到最新版本（v1.2.0 起：视频默认 720P、H.264 优先、文件以绝对路径发送、失败时保留文件并提示）
+3. 仍失败可在插件设置中将 `video_quality` 调低（如 32）或开启 `transcode` 强制转码
+4. 插件发送失败时会保留视频文件并提示路径，可用 `/bilibanshi clean` 清理
+5. v1.2.0 起插件会为视频自动生成封面随消息发送（NapCat 发送视频需要缩略图，缺失会导致上传失败，见 NapCat #1435/#1485）
+
+## 项目结构（v1.2.0）
+
+```
+main.py            # 插件入口：命令路由、定时任务、核心流程
+bilibili_client.py # B站API客户端：wbi签名、搜索、播放流地址
+downloader.py     # 视频下载、ffmpeg合并（H.264兼容QQ发送）、临时文件清理
+state_store.py     # JSON状态原子持久化（并发安全）
+group_policy.py    # 白名单/黑名单策略与旧版数据迁移
+_conf_schema.json  # 配置 schema（含白名单配置项）
+```
 
 ## 依赖
 

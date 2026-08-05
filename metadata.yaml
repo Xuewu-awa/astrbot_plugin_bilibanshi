@@ -1,6 +1,6 @@
-name: astrbot_plugin_bilibanshi 
+name: astrbot_plugin_bilibanshi
 display_name: b站搬石
 desc: 让你的bot在b站搬石
-version: v1.0.0 
+version: v1.2.0
 author: 雪雾
 repo: https://github.com/Xuewu-awa/astrbot_plugin_bilibanshi

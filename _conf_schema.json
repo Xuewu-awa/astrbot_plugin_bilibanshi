@@ -23,6 +23,18 @@
         "default": 5,
         "hint": "搜索B站时最多翻几页，页数越多可选视频越多，但速度越慢"
     },
+    "video_quality": {
+        "description": "视频画质",
+        "type": "int",
+        "default": 64,
+        "hint": "B站视频画质等级：16=360P, 32=480P, 64=720P, 80=1080P。画质越高文件越大，QQ等平台发送失败率越高，建议默认720P"
+    },
+    "transcode": {
+        "description": "强制转码为 H.264 main profile",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后所有视频都会用 ffmpeg 转码为 H.264 main profile（兼容性最好，但更耗CPU）。关闭时仅非 H.264 源转码"
+    },
     "delete_after_send": {
         "description": "发送后删除视频文件",
         "type": "bool",
@@ -47,6 +59,18 @@
         "type": "list",
         "default": [],
         "hint": "这些群不会收到定时搬石的视频推送"
+    },
+    "use_whitelist_mode": {
+        "description": "启用白名单模式",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后只有白名单中的群会收到视频推送；关闭则为黑名单模式"
+    },
+    "whitelist_groups": {
+        "description": "白名单群号列表",
+        "type": "list",
+        "default": [],
+        "hint": "白名单模式下，只有这些群会收到定时搬石的视频推送"
     },
     "quiet_hours_start": {
         "description": "免打扰开始时间",
