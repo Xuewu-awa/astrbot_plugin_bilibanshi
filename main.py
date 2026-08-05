@@ -432,34 +432,21 @@ class BilibiliPolluterPlugin(Star):
         file_path: str,
         cover_path: Optional[str] = None,
     ) -> List[Any]:
-        """创建视频消息链。cover_path: 视频封面（NapCat 缺缩略图时上传会失败）。"""
-        title = video_info.get("title", "未知标题")
-        author = video_info.get("author", "未知UP主")
-        play = video_info.get("play_count", 0)
-        bvid = video_info.get("bvid", "")
-        duration = video_info.get("duration", "未知")
+        """创建消息链：只发送视频文件，不带文字说明。
 
-        text_msg = (
-            f"【B站搬石】\n"
-            f"标题：{title}\n"
-            f"UP主：{author}\n"
-            f"时长：{duration}\n"
-            f"播放量：{play}\n"
-            f"链接：https://www.bilibili.com/video/{bvid}"
-        )
-
-        chain = [Plain(text_msg)]
+        注意：NapCat 的视频消息上传存在 bug（rich media transfer failed），
+        因此使用 File（文件）段发送视频，QQ 接收后可直接播放。
+        """
+        chain: List[Any] = []
 
         # 检查文件是否存在
         if file_path and os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            video = Video.fromFileSystem(path=file_path)
-            # 关键：直接用绝对路径作为 file 字段，避免 file:/// URI 在 NapCat
-            # 等协议端对中文/特殊字符路径解码失败导致 "rich media transfer failed"
-            video.file = str(Path(file_path).resolve())
-            # 附带封面：NapCat 发送视频需要缩略图，缺失时上传失败（NapCat #1435/#1485）
-            if cover_path and os.path.exists(cover_path):
-                video.cover = str(Path(cover_path).resolve())
-            chain.append(video)
+            chain.append(
+                File(
+                    name=os.path.basename(file_path),
+                    file=str(Path(file_path).resolve()),
+                )
+            )
 
         return chain
 
@@ -640,22 +627,17 @@ class BilibiliPolluterPlugin(Star):
                 self._last_scan_failed = not send_ok
                 if send_ok:
                     await self._record_sent_title(video_info.get("title", ""))
-                    await self._cleanup_after_send(file_path, cover_path)
                 else:
-                    # 发送失败：记录 failed 标题并保留文件，便于排查
+                    # 发送失败：记录 failed 标题，同样清理本地文件
                     await self._record_sent_title(
                         video_info.get("title", ""), failed=True
                     )
                     await event.send(
                         MessageChain(
-                            [
-                                Plain(
-                                    "⚠️ 视频已下载但发送失败（平台拒绝该文件），"
-                                    f"文件保留在: {file_path}"
-                                )
-                            ]
+                            [Plain("⚠️ 视频已下载但发送失败（平台拒绝该文件）")]
                         )
                     )
+                await self._cleanup_after_send(file_path, cover_path)
                 return
 
             # 定时任务：发送到所有群
@@ -670,12 +652,9 @@ class BilibiliPolluterPlugin(Star):
                     video_info.get("title", ""), failed=all_failed
                 )
                 if all_failed:
-                    # 保留文件供排查（可手动发送该文件判断是文件问题还是协议端问题）
                     logger.warning(
-                        f"视频发送到所有群失败，文件保留: {file_path} "
-                        f"（可用 /bilibanshi clean 清理）"
+                        f"视频发送到所有群失败: {video_info.get('title', '')}"
                     )
-                    return
             else:
                 self._last_scan_failed = False
                 logger.warning(
