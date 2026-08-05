@@ -35,7 +35,7 @@
 - `transcode`：强制转码为 H.264 main profile（默认关闭，兼容性最好但更耗 CPU）
 - `delete_after_send`：发送后删除本地视频
 - `search_keywords`：搜索关键词列表
-- `use_whitelist_mode`：是否启用白名单模式
+- `use_whitelist_mode`：是否启用白名单模式（**默认开启**，防止新装插件后自动群发）
 - `whitelist_groups`：白名单群号列表
 - `blacklist_groups`：黑名单群号列表
 - `quiet_hours_start`：免打扰开始时间
@@ -137,9 +137,9 @@
 如果遇到 `rich media transfer failed` 错误：
 
 1. 先手动在 QQ 里发送一个 mp4 视频测试。手动也发不出 → 是 QQ/NapCat 侧问题（版本不匹配、风控、上传接口故障），与插件无关
-2. 手动能发但插件发不出 → 请更新插件到最新版本（v1.2.0 起：视频默认 720P、H.264 优先、文件以绝对路径发送、失败时保留文件并提示）
+2. 手动能发但插件发不出 → 已知为 NapCat 视频消息上传 bug（`rich media transfer failed`），v1.2.1 起插件改为**文件（File）段发送**视频，QQ 接收后可直接播放
 3. 仍失败可在插件设置中将 `video_quality` 调低（如 32）或开启 `transcode` 强制转码
-4. 插件发送失败时会保留视频文件并提示路径，可用 `/bilibanshi clean` 清理
+4. 视频发送（成功或失败）后插件都会清理本地文件，不会残留
 5. v1.2.0 起插件会为视频自动生成封面随消息发送（NapCat 发送视频需要缩略图，缺失会导致上传失败，见 NapCat #1435/#1485）
 
 ## 项目结构（v1.2.0）
